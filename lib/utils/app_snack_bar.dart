@@ -12,6 +12,7 @@ class AppSnackBar {
   }) async {
     final content = Column(
       mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(title, style: const TextStyle(fontSize: 16)),
         if (subtitle != null) Text(subtitle),
@@ -20,6 +21,7 @@ class AppSnackBar {
     final action = onAcceptAction != null && actionName != null
         ? SnackBarAction(label: actionName, onPressed: onAcceptAction)
         : null;
+
     final messenger = ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: content,

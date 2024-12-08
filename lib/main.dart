@@ -1,11 +1,18 @@
+/// Main entry point for the Nearby Group Chat app.
+/// Accessibility Notes:
+/// - The login page and subsequent pages should be accessible with screen readers.
+/// - Buttons and images have semantic labels or descriptive text.
+
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
-import 'package:flutter/foundation.dart';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
+
 import 'chat_room.dart';
+import 'help_page.dart'; // Import our new HelpPage
 
 void main() {
   runApp(const MyApp());
@@ -27,10 +34,7 @@ class MyApp extends StatelessWidget {
 }
 
 class LoginPage extends StatefulWidget {
-  static String? username;
-  static String? headimg;
-
-  const LoginPage({Key? key}) : super(key: key);
+  const LoginPage({super.key});
 
   @override
   State<LoginPage> createState() => _LoginPageState();
@@ -41,18 +45,10 @@ class _LoginPageState extends State<LoginPage> {
   final picker = ImagePicker();
   String? image;
 
-  @override
-  void initState() {
-    super.initState();
-  }
-
-  Future<void> chooseImage() async {
-    if (kIsWeb) {
-      // Implement web logic if needed
-      return;
-    }
+  void chooseImage() async {
     XFile? pickedFile = await picker.pickImage(
         source: ImageSource.gallery, maxHeight: 600, maxWidth: 600);
+
     if (pickedFile != null) {
       List<int> fileBytes = await File(pickedFile.path).readAsBytes();
       String base64String = base64Encode(fileBytes);
@@ -62,12 +58,7 @@ class _LoginPageState extends State<LoginPage> {
     }
   }
 
-  Future<String> _loadDefaultImageBase64() async {
-    final bytes = await rootBundle.load('images/default_avatar.png');
-    return base64Encode(bytes.buffer.asUint8List());
-  }
-
-  void loginWithNameAndImage() async {
+  void loginWithNameAndImage() {
     final name = _usernameController.text.trim();
     if (name.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -80,14 +71,12 @@ class _LoginPageState extends State<LoginPage> {
       return;
     }
 
-    LoginPage.username = name;
-    LoginPage.headimg = image;
     Navigator.push(
       context,
       MaterialPageRoute(
         builder: (context) => ChatRoom(
-          myName: LoginPage.username!,
-          myImage: LoginPage.headimg!,
+          myName: name,
+          myImage: image!,
         ),
       ),
     );
@@ -95,29 +84,39 @@ class _LoginPageState extends State<LoginPage> {
 
   void loginWithoutNameAndImage() async {
     final randomName = "User${Random().nextInt(10000)}";
-    final defaultImageBase64 = await _loadDefaultImageBase64();
+    String defaultImageBase64 = "";
 
-    LoginPage.username = randomName;
-    LoginPage.headimg = defaultImageBase64;
+    try {
+      // Load default avatar from images/default_avatar.png
+      final bytes = await rootBundle.load('images/default_avatar.png');
+      defaultImageBase64 = base64Encode(bytes.buffer.asUint8List());
+    } catch (e) {
+      // If not found or fails, just use an empty string (no image)
+      defaultImageBase64 = "";
+    }
 
     Navigator.push(
       context,
       MaterialPageRoute(
         builder: (context) => ChatRoom(
-          myName: LoginPage.username!,
-          myImage: LoginPage.headimg!,
+          myName: randomName,
+          myImage: defaultImageBase64,
         ),
       ),
     );
   }
 
   void toHelp() {
-    // Implement help page if you have one
-    // Navigator.push(...);
+    // Navigate to HelpPage
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (context) => const HelpPage()),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
+    // Accessibility: Buttons have descriptive text. Images have semantic labels.
     return Scaffold(
       extendBodyBehindAppBar: true,
       appBar: AppBar(
@@ -138,10 +137,19 @@ class _LoginPageState extends State<LoginPage> {
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
                 const SizedBox(height: 50),
-                const LoginTitle(),
+                const Text(
+                  "UnWire",
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 45,
+                      fontStyle: FontStyle.italic),
+                  semanticsLabel: 'App title: UnWire',
+                ),
                 const Text(
                   "Choose an Image & Display Name",
                   style: TextStyle(color: Colors.white),
+                  semanticsLabel: 'Instruction: Choose an Image & Display Name',
                 ),
                 const SizedBox(height: 50),
                 GestureDetector(
@@ -151,12 +159,14 @@ class _LoginPageState extends State<LoginPage> {
                       ? Image.asset(
                           "images/img.jpg",
                           width: 100,
+                          semanticLabel: 'Default avatar image placeholder',
                         )
                       : Image.memory(
                           base64Decode(image!),
                           width: 100,
                           height: 100,
                           fit: BoxFit.cover,
+                          semanticLabel: 'User selected avatar',
                         ),
                 ),
                 const SizedBox(height: 20),
@@ -166,6 +176,7 @@ class _LoginPageState extends State<LoginPage> {
                       color: Colors.white,
                       fontSize: 25,
                       fontWeight: FontWeight.bold),
+                  semanticsLabel: 'Enter your display name',
                 ),
                 const SizedBox(height: 20),
                 Container(
@@ -173,9 +184,15 @@ class _LoginPageState extends State<LoginPage> {
                   decoration: BoxDecoration(
                       color: Colors.white,
                       borderRadius: BorderRadius.circular(10)),
-                  child: TextField(
-                    controller: _usernameController,
-                    decoration: const InputDecoration(border: InputBorder.none),
+                  child: Semantics(
+                    label: 'Username TextField',
+                    child: TextField(
+                      controller: _usernameController,
+                      decoration: const InputDecoration(
+                          border: InputBorder.none,
+                          hintText: 'Username',
+                      ),
+                    ),
                   ),
                 ),
                 const SizedBox(height: 30),
@@ -192,6 +209,7 @@ class _LoginPageState extends State<LoginPage> {
                       "Login",
                       style: TextStyle(
                           color: Colors.white, fontWeight: FontWeight.bold),
+                      semanticsLabel: 'Login button',
                     ),
                   ),
                 ),
@@ -199,6 +217,7 @@ class _LoginPageState extends State<LoginPage> {
                 const Text(
                   "Or",
                   style: TextStyle(color: Colors.white),
+                  semanticsLabel: 'Or',
                 ),
                 const SizedBox(height: 20),
                 InkWell(
@@ -214,6 +233,7 @@ class _LoginPageState extends State<LoginPage> {
                         "Login without name and image",
                         style: TextStyle(
                             color: Colors.white, fontWeight: FontWeight.bold),
+                        semanticsLabel: 'Login without name and image button',
                       ),
                     )),
                 const SizedBox(height: 40),
@@ -222,26 +242,12 @@ class _LoginPageState extends State<LoginPage> {
                   child: const Text(
                     "Need help? Visit our help center",
                     style: TextStyle(color: Colors.white),
+                    semanticsLabel: 'Go to help center',
                   ),
                 )
               ],
             ),
           )),
-    );
-  }
-}
-
-class LoginTitle extends StatelessWidget {
-  const LoginTitle({super.key});
-  @override
-  Widget build(BuildContext context) {
-    return const Text(
-      "UnWire",
-      style: TextStyle(
-          color: Colors.white,
-          fontWeight: FontWeight.bold,
-          fontSize: 45,
-          fontStyle: FontStyle.italic),
     );
   }
 }

@@ -1,15 +1,44 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:nearby_service/nearby_service.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:intl/intl.dart';
+import 'package:image_picker/image_picker.dart'; // Ensure image_picker is added in pubspec.yaml
 import 'utils/app_snack_bar.dart';
+
+// Simple User model
+class User {
+  int id;
+  String? headimg;
+  String? nickname;
+  User({required this.id, this.headimg, this.nickname});
+}
+
+// ChatMessage model
+class ChatMessage {
+  int? id;
+  int? sender; // 1 for local, 2+ for remote
+  String? headimg;
+  String? nickname;
+  String? type; // "text" or "image"
+  String? text;
+  String? image; // base64 string for image
+  int? time;
+}
 
 class ChatRoom extends StatefulWidget {
   final String myName;
+  final String myImage; // base64 encoded image
 
   const ChatRoom({
     super.key,
     required this.myName,
+    required this.myImage,
   });
 
   @override
@@ -18,26 +47,46 @@ class ChatRoom extends StatefulWidget {
 
 class _ChatRoomState extends State<ChatRoom> {
   final _nearbyService = NearbyService.getInstance(logLevel: NearbyServiceLogLevel.debug);
-
   final TextEditingController _messageController = TextEditingController();
-  final List<String> _messages = [];
+  final ScrollController _scrollController = ScrollController();
 
   List<NearbyDevice> _connectedDevices = [];
   List<NearbyDevice> _peers = [];
 
-  // Maps deviceId to the chosen name introduced by that device
   final Map<String, String> _deviceChosenNames = {};
+  final Map<String, String> _deviceChosenImages = {};
 
   StreamSubscription<List<NearbyDevice>>? _peersSubscription;
   bool _initialized = false;
-  bool _popupShown = false; // Prevent multiple automatic popups
-  Timer? _introTimer; // Timer to resend intro messages regularly
-  bool _burstActive = false; // To prevent overlapping bursts
+  bool _popupShown = false;
+  Timer? _introTimer;
+  bool _burstActive = false;
+
+  // Users list: user id=1 local user, id=2... remote users
+  List<User> users = [];
+  // Chat messages
+  List<ChatMessage> list = [];
+
+  int _remoteUserIdCounter = 2; // Assign incremental IDs to connected devices
+  Map<String,int> _deviceIdToUserId = {};
+  Map<int,String> _userIdToDeviceId = {};
+
+  // Cached images
+  final Map<String,MemoryImage> _cachedMemoryImages = {};
+  MemoryImage? _localUserImageMemory;
+
+  final picker = ImagePicker();
 
   @override
   void initState() {
     super.initState();
     _initService();
+    // Add local user to the user list
+    users.add(User(id: 1, headimg: widget.myImage, nickname: widget.myName));
+    // Cache local user image if available
+    if (widget.myImage.isNotEmpty) {
+      _localUserImageMemory = MemoryImage(base64Decode(widget.myImage));
+    }
   }
 
   Future<void> _initService() async {
@@ -70,7 +119,6 @@ class _ChatRoomState extends State<ChatRoom> {
         setState(() {
           _peers = peers;
         });
-        // Show the device selection popup only once automatically
         if (peers.isNotEmpty && _connectedDevices.isEmpty && !_popupShown) {
           _showDeviceSelectionDialog(peers);
           _popupShown = true;
@@ -129,14 +177,8 @@ class _ChatRoomState extends State<ChatRoom> {
         }
       });
       _startCommunicationChannelForDevice(peer);
-
-      // After connecting, send an immediate intro message
       _sendIntroMessage(peer);
-
-      // Start a burst of intro messages shortly after connecting to ensure it is received
       _startIntroBurst();
-
-      // If not already running, start a timer to periodically resend intro messages
       _startIntroTimer();
 
       AppSnackBar.show(context, title: 'Connected to ${peer.info.displayName}');
@@ -158,21 +200,50 @@ class _ChatRoomState extends State<ChatRoom> {
               onTextRequest: (req) => req.value,
             );
 
-            if (text == null) {
-              return; // No text
+            if (text == null) return;
+
+            final devId = device.info.id;
+            if (!_deviceChosenNames.containsKey(devId)) {
+              _deviceChosenNames[devId] = device.info.displayName ?? 'Unknown';
             }
 
+            int senderId = _getOrAssignUserIdForDevice(devId);
+
             if (text.startsWith('intro:')) {
-              // Intro message: do not display. Just set the chosen name.
-              final introducedName = text.substring('intro:'.length).trim();
-              _deviceChosenNames[device.info.id] = introducedName;
+              final content = text.substring('intro:'.length).trim();
+              final parts = content.split('|');
+              final introducedName = parts[0];
+              final introducedImage = parts.length > 1 ? parts[1] : '';
+
+              _deviceChosenNames[devId] = introducedName;
+              _deviceChosenImages[devId] = introducedImage;
+
+              // Cache image if available
+              if (introducedImage.isNotEmpty) {
+                _cachedMemoryImages[devId] = MemoryImage(base64Decode(introducedImage));
+              }
+
+              User? existingUser = users.firstWhere((u) => u.id == senderId, orElse: () => User(id: senderId));
+              existingUser.nickname = introducedName;
+              existingUser.headimg = introducedImage;
+              if (!users.contains(existingUser)) {
+                users.add(existingUser);
+              }
+
             } else {
-              // Normal message
-              final senderName = _deviceChosenNames[device.info.id] ?? 
-                                  (device.info.displayName ?? 'Unknown Device');
+              // Normal text message
+              final msg = ChatMessage();
+              msg.id = DateTime.now().millisecondsSinceEpoch;
+              msg.sender = senderId;
+              msg.type = "text";
+              msg.text = text;
+              msg.time = DateTime.now().millisecondsSinceEpoch;
+              msg.nickname = _deviceChosenNames[devId];
+              msg.headimg = _deviceChosenImages[devId];
               setState(() {
-                _messages.add('$senderName: $text');
+                list.add(msg);
               });
+              _scrollToBottom();
             }
           },
         ),
@@ -180,33 +251,38 @@ class _ChatRoomState extends State<ChatRoom> {
     );
   }
 
+  int _getOrAssignUserIdForDevice(String deviceId) {
+    if (_deviceIdToUserId.containsKey(deviceId)) {
+      return _deviceIdToUserId[deviceId]!;
+    } else {
+      _deviceIdToUserId[deviceId] = _remoteUserIdCounter++;
+      _userIdToDeviceId[_deviceIdToUserId[deviceId]!] = deviceId;
+      return _deviceIdToUserId[deviceId]!;
+    }
+  }
+
   void _startIntroTimer() {
-    _introTimer ??= Timer.periodic(const Duration(seconds: 30), (timer) {
+    // Increase the interval to 2 minutes after the short burst
+    _introTimer ??= Timer.periodic(const Duration(minutes: 2), (timer) {
       _broadcastIntroMessage();
     });
   }
 
-  /// Send multiple intro messages over a short period after connecting to ensure delivery.
   void _startIntroBurst() {
-    if (_burstActive) return; // Prevent overlapping bursts
+    if (_burstActive) return;
     _burstActive = true;
 
-    // Send intro messages at 0s, 5s, 10s after connecting
-    // Already sent one at connect time (0s), let's do at 5s and 10s
     Future.delayed(const Duration(seconds: 5), () {
       _broadcastIntroMessage();
     });
-    Future.delayed(const Duration(seconds: 7), () {
-      _broadcastIntroMessage();
-    });    
     Future.delayed(const Duration(seconds: 10), () {
       _broadcastIntroMessage();
-      _burstActive = false; // Burst completed
+      _burstActive = false;
     });
   }
 
   void _sendIntroMessage(NearbyDevice device) async {
-    final introText = 'intro:${widget.myName}';
+    final introText = 'intro:${widget.myName}|${widget.myImage}';
     await _nearbyService.send(
       OutgoingNearbyMessage(
         content: NearbyMessageTextRequest.create(value: introText),
@@ -217,7 +293,7 @@ class _ChatRoomState extends State<ChatRoom> {
 
   void _broadcastIntroMessage() async {
     if (_connectedDevices.isEmpty) return;
-    final introText = 'intro:${widget.myName}';
+    final introText = 'intro:${widget.myName}|${widget.myImage}';
     for (final device in _connectedDevices) {
       await _nearbyService.send(
         OutgoingNearbyMessage(
@@ -232,6 +308,21 @@ class _ChatRoomState extends State<ChatRoom> {
     final text = _messageController.text.trim();
     if (text.isEmpty) return;
 
+    final msg = ChatMessage();
+    msg.id = DateTime.now().millisecondsSinceEpoch;
+    msg.sender = 1; // local user
+    msg.type = "text";
+    msg.text = text;
+    msg.time = DateTime.now().millisecondsSinceEpoch;
+    msg.nickname = widget.myName;
+    msg.headimg = widget.myImage;
+    setState(() {
+      list.add(msg);
+      _messageController.clear();
+    });
+
+    _scrollToBottom(); // scroll after sending message
+
     for (final device in _connectedDevices) {
       await _nearbyService.send(
         OutgoingNearbyMessage(
@@ -240,13 +331,6 @@ class _ChatRoomState extends State<ChatRoom> {
         ),
       );
     }
-
-    setState(() {
-      _messages.add('${widget.myName}: $text');
-      _messageController.clear();
-    });
-
-    // After sending a message, also send an intro message to ensure the other side sees our chosen name
     _broadcastIntroMessage();
   }
 
@@ -266,9 +350,13 @@ class _ChatRoomState extends State<ChatRoom> {
             child: ListView(
               shrinkWrap: true,
               children: _connectedDevices.map((d) {
-                final display = _deviceChosenNames[d.info.id] ??
-                    (d.info.displayName ?? 'Unknown Device');
+                final devId = d.info.id;
+                final display = _deviceChosenNames[devId] ?? (d.info.displayName ?? 'Unknown Device');
+                final image = _cachedMemoryImages[devId]; // Use cached MemoryImage
                 return ListTile(
+                  leading: image != null
+                      ? CircleAvatar(backgroundImage: image)
+                      : const CircleAvatar(child: Icon(Icons.person)),
                   title: Text(display),
                 );
               }).toList(),
@@ -291,6 +379,205 @@ class _ChatRoomState extends State<ChatRoom> {
       return;
     }
     _showDeviceSelectionDialog(_peers);
+  }
+
+  Future<void> _downloadBase64Image(ChatMessage chatMessage) async {
+    if (chatMessage.image == null || chatMessage.image!.isEmpty) return;
+    try {
+      final decodedBytes = base64Decode(chatMessage.image!);
+      final directory = await getApplicationDocumentsDirectory();
+      final file = File('${directory.path}/downloaded_image.png');
+      await file.writeAsBytes(decodedBytes);
+      AppSnackBar.show(context, title: "Image saved at ${file.path}");
+    } catch (e) {
+      print("$e");
+    }
+  }
+
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollController.hasClients) {
+        _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+      }
+    });
+  }
+
+  MemoryImage? _getUserImageBySenderId(int senderId) {
+    if (senderId == 1) {
+      return _localUserImageMemory;
+    } else {
+      // Find deviceId from userId
+      if (!_userIdToDeviceId.containsKey(senderId)) return null;
+      final deviceId = _userIdToDeviceId[senderId]!;
+      return _cachedMemoryImages[deviceId];
+    }
+  }
+
+  String _getUserNameBySenderId(int senderId) {
+    if (senderId == 1) return widget.myName;
+    final user = users.firstWhere((u) => u.id == senderId, orElse: () => User(id: senderId, nickname: 'Unknown'));
+    return user.nickname ?? 'Unknown';
+  }
+
+  Widget _buildMessageItem(ChatMessage chatMessage) {
+    bool isLocal = (chatMessage.sender == 1);
+
+    String time = DateFormat('HH:mm').format(
+      DateTime.fromMillisecondsSinceEpoch(chatMessage.time ?? DateTime.now().millisecondsSinceEpoch)
+    );
+
+    int index = list.indexOf(chatMessage);
+    ChatMessage? last = index > 0 ? list[index - 1] : null;
+    bool showTime = false;
+    if (last == null) {
+      showTime = true;
+    } else {
+      if ((chatMessage.time! - last.time!) > 1000 * 10 * 60) {
+        showTime = true;
+      }
+    }
+
+    // Get user name & avatar for this message
+    final senderName = _getUserNameBySenderId(chatMessage.sender!);
+    final senderImage = _getUserImageBySenderId(chatMessage.sender!);
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 20),
+      child: Column(
+        crossAxisAlignment: isLocal ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+        children: [
+          if (showTime)
+            Text(time, style: const TextStyle(color: Colors.white)),
+          if (showTime)
+            const SizedBox(height: 10),
+          // Show user avatar and name above the message
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (!isLocal && senderImage != null)
+                CircleAvatar(backgroundImage: senderImage, radius: 15), // smaller avatar
+              if (!isLocal && senderImage == null)
+                const CircleAvatar(child: Icon(Icons.person), radius: 15),
+              if (!isLocal) const SizedBox(width: 5),
+              Text(senderName, style: const TextStyle(color: Colors.white, fontSize: 10)), // smaller font
+              if (isLocal && senderImage != null) ...[
+                const SizedBox(width: 5),
+                CircleAvatar(backgroundImage: senderImage, radius: 15),
+              ],
+              if (isLocal && senderImage == null) ...[
+                const SizedBox(width: 5),
+                const CircleAvatar(child: Icon(Icons.person), radius: 15),
+              ],
+            ],
+          ),
+          const SizedBox(height: 5),
+          Container(
+            alignment: isLocal ? Alignment.centerRight : Alignment.centerLeft,
+            child: Container(
+              constraints: const BoxConstraints(maxWidth: 300),
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                  color: isLocal ? const Color(0xff222222) : const Color(0xff383f4b),
+                  borderRadius: BorderRadius.circular(20)),
+              child: chatMessage.type == "text"
+                  ? Text(
+                      chatMessage.text!,
+                      textAlign: TextAlign.left,
+                      style: const TextStyle(color: Colors.white),
+                    )
+                  : (chatMessage.type == "image"
+                      ? Row(
+                          mainAxisSize: MainAxisSize.min,
+                          mainAxisAlignment: isLocal ? MainAxisAlignment.end : MainAxisAlignment.start,
+                          children: [
+                            InkWell(
+                                onTap: () {
+                                  setState(() {
+                                    list.remove(chatMessage);
+                                  });
+                                },
+                                child: Image.asset("images/close.jpg", width: 24, height: 24)),
+                            const SizedBox(width: 10),
+                            InkWell(
+                                onTap: () {
+                                  _downloadBase64Image(chatMessage);
+                                },
+                                child: Image.asset("images/download.jpg", width: 24, height: 24)),
+                            const SizedBox(width: 10),
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(10),
+                              child: Image.memory(
+                                base64Decode(chatMessage.image!),
+                                width: 150,
+                                height: 100,
+                                fit: BoxFit.cover,
+                              ),
+                            )
+                          ],
+                        )
+                      : Container()),
+            ),
+          )
+        ],
+      ),
+    );
+  }
+
+  Widget _buildUsersRow() {
+    return Row(
+      children: users.map((User e) {
+        MemoryImage? mem;
+        if (e.id == 1 && _localUserImageMemory != null) {
+          mem = _localUserImageMemory;
+        } else if (e.headimg != null && e.headimg!.isNotEmpty) {
+          // Try cached images by headimg string
+          if (!_cachedMemoryImages.containsKey(e.headimg!)) {
+            final imgBytes = base64Decode(e.headimg!);
+            _cachedMemoryImages[e.headimg!] = MemoryImage(imgBytes);
+          }
+          mem = _cachedMemoryImages[e.headimg!];
+        }
+
+        return Container(
+          margin: const EdgeInsets.only(right: 10),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(20),
+            child: mem != null 
+                ? Image(image: mem, width: 40, height: 40, fit: BoxFit.cover)
+                : const CircleAvatar(child: Icon(Icons.person)),
+          ),
+        );
+      }).toList(),
+    );
+  }
+
+  Future<void> _chooseImageAndSend() async {
+    if (kIsWeb) {
+      return;
+    }
+    XFile? pickedFile = await picker.pickImage(
+        source: ImageSource.gallery, maxHeight: 600, maxWidth: 600);
+
+    if (pickedFile != null) {
+      List<int> fileBytes = await File(pickedFile.path).readAsBytes();
+      String base64String = base64Encode(fileBytes);
+
+      final msg = ChatMessage();
+      msg.id = DateTime.now().millisecondsSinceEpoch;
+      msg.image = base64String;
+      msg.sender = 1;
+      msg.nickname = widget.myName;
+      msg.headimg = widget.myImage;
+      msg.type = "image";
+      msg.time = DateTime.now().millisecondsSinceEpoch;
+
+      setState(() {
+        list.add(msg);
+      });
+
+      _scrollToBottom();
+      _broadcastIntroMessage();
+    }
   }
 
   @override
@@ -321,38 +608,103 @@ class _ChatRoomState extends State<ChatRoom> {
             onPressed: _showDiscoveredDevicesAgain,
           ),
         ],
+        systemOverlayStyle: SystemUiOverlayStyle.light.copyWith(
+            statusBarColor: Colors.transparent,
+            statusBarIconBrightness: Brightness.light),
+        backgroundColor: Colors.transparent,
+        shadowColor: Colors.transparent,
+        foregroundColor: Colors.white,
       ),
-      body: Column(
-        children: [
-          if (connectedDeviceNames.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.all(8.0),
-              child: Text('Connected: $connectedDeviceNames'),
-            ),
-          Expanded(
-            child: ListView.builder(
-              itemCount: _messages.length,
-              itemBuilder: (context, index) => ListTile(title: Text(_messages[index])),
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.all(8.0),
-            child: Row(
+      // Set chat room background to match main.dart
+      backgroundColor: const Color(0xff252d38),
+      body: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(20),
+        decoration: const BoxDecoration(),
+        child: Column(
+          children: [
+            // Top users row + updated dynamic info
+            Row(
               children: [
-                Expanded(
-                  child: TextField(
-                    controller: _messageController,
-                    decoration: const InputDecoration(hintText: 'Enter your message'),
-                  ),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.send),
-                  onPressed: _sendMessage,
-                ),
+                Expanded(child: _buildUsersRow()),
+                Column(
+                  children: [
+                    Text("My Name: ${widget.myName}", style: const TextStyle(color: Colors.white, fontSize: 14)),
+                    Text("Connected: $connectedDeviceNames", style: const TextStyle(color: Colors.white, fontSize: 14)),
+                  ],
+                )
               ],
             ),
-          ),
-        ],
+            const SizedBox(height: 20),
+            Expanded(
+              child: ListView.builder(
+                controller: _scrollController,
+                itemCount: list.length,
+                itemBuilder: (context, index) {
+                  return _buildMessageItem(list[index]);
+                },
+              ),
+            ),
+            Container(
+              child: Row(
+                children: [
+                  Expanded(
+                      child: Container(
+                    height: 40,
+                    padding: const EdgeInsets.only(left: 10),
+                    decoration: BoxDecoration(
+                        color: const Color(0xFF1c222b),
+                        borderRadius: BorderRadius.circular(10)),
+                    child: Row(
+                      children: [
+                        Expanded(
+                            child: TextField(
+                          onSubmitted: (v) {},
+                          controller: _messageController,
+                          style: const TextStyle(color: Colors.white),
+                          decoration: const InputDecoration(border: InputBorder.none),
+                        )),
+                        GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onTap: _sendMessage,
+                            child: Container(
+                              width: 40,
+                              height: 40,
+                              alignment: Alignment.center,
+                              decoration: BoxDecoration(
+                                  color: const Color(0xFF383f49),
+                                  borderRadius: BorderRadius.circular(10)),
+                              child: Image.asset(
+                                "images/qipao.jpg",
+                                width: 23,
+                                height: 23,
+                              ),
+                            ))
+                      ],
+                    ),
+                  )),
+                  const SizedBox(width: 10),
+                  GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: _chooseImageAndSend,
+                      child: Container(
+                        width: 40,
+                        height: 40,
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                            color: const Color(0xFF64a98a),
+                            borderRadius: BorderRadius.circular(10)),
+                        child: const Icon(
+                          Icons.photo_camera,
+                          color: Colors.white,
+                          size: 19,
+                        ),
+                      ))
+                ],
+              ),
+            )
+          ],
+        ),
       ),
     );
   }

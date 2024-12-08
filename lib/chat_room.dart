@@ -196,6 +196,9 @@ class _ChatRoomState extends State<ChatRoom> {
     Future.delayed(const Duration(seconds: 5), () {
       _broadcastIntroMessage();
     });
+    Future.delayed(const Duration(seconds: 7), () {
+      _broadcastIntroMessage();
+    });    
     Future.delayed(const Duration(seconds: 10), () {
       _broadcastIntroMessage();
       _burstActive = false; // Burst completed

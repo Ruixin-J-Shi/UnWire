@@ -2,7 +2,7 @@
 
 ## Overview
 
-[intro video](https://drive.google.com/file/d/1g9vX-2V3WXsn7yhl7o_0M68zWBeZYGGh/view?usp=sharing)
+[intro video](https://youtu.be/IhrY5IavS0E)
 
 **UnWire** is a mobile messaging app that enables real-time text and photo sharing between nearby devices **without an internet connection**. It creates a local peer-to-peer network so users can chat and share images with others in the vicinity (on the same local network or direct Wi-Fi connection). This makes UnWire ideal for everyday users who want to communicate in places with limited or no internet access, or who prefer local offline communication. The app is currently in **early development** (prototype stage), and while fully functional on Android, cross-platform support (iOS and others) is planned for future releases. UnWire is designed for **end users (not developers)**, offering a simple and intuitive interface to connect and chat with friends or colleagues nearby.
 
